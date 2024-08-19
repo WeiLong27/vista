@@ -686,15 +686,15 @@ contract SP0Product is ReentrancyGuard {
             sumVaultUnderlyingAmounts += deposit.amount;
             vaultMetadata.currentAssetAmount += deposit.amount;
 
-            depositQueue.pop();
-            queuedDepositsCount -= 1;
-            processCount -= 1;
-
             emit DepositProcessed(
                 vaultAddress,
                 deposit.receiver,
                 deposit.amount
             );
+
+            depositQueue.pop();
+            queuedDepositsCount -= 1;
+            processCount -= 1;
         }
 
         if (queuedDepositsCount == 0) {

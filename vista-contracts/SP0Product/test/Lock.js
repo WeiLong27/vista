@@ -1,126 +1,203 @@
-const {
-  time,
-  loadFixture,
-} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
-const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { expect } = require("chai");
+const { ethers } = require("hardhat");
 
-describe("Lock", function () {
-  // We define a fixture to reuse the same setup in every test.
-  // We use loadFixture to run this setup once, snapshot that state,
-  // and reset Hardhat Network to that snapshot in every test.
-  async function deployOneYearLockFixture() {
-    const ONE_YEAR_IN_SECS = 365 * 24 * 60 * 60;
-    const ONE_GWEI = 1_000_000_000;
+describe("SP0Product - Extended Tests", function () {
+  let sp0Product, vistaState, vaultAddress, asset, owner, traderAdmin, operatorAdmin, addr1, addr2;
 
-    const lockedAmount = ONE_GWEI;
-    const unlockTime = (await time.latest()) + ONE_YEAR_IN_SECS;
+  beforeEach(async function () {
+    // Get signers dynamically
+    [owner, traderAdmin, operatorAdmin, serviceAdmin, addr1, addr2, addr3] = await ethers.getSigners();
 
-    // Contracts are deployed using the first signer/account by default
-    const [owner, otherAccount] = await ethers.getSigners();
+    // Deploy TestUSDC with an initial supply
+    const TestUSDC = await ethers.getContractFactory("TestUSDC");
+    asset = await TestUSDC.deploy(ethers.parseUnits("1000000", 6)); // 1,000,000 USDC with 6 decimals
+    await asset.waitForDeployment();
+    console.log("TestUSDC deployed at:", asset.target);
 
-    const Lock = await ethers.getContractFactory("Lock");
-    const lock = await Lock.deploy(unlockTime, { value: lockedAmount });
+    // Deploy the Calculations library
+    const calculations = await ethers.deployContract("Calculations");
+    await calculations.waitForDeployment();
+    console.log("Calculations library deployed at:", calculations.target);
 
-    return { lock, unlockTime, lockedAmount, owner, otherAccount };
-  }
+    // Deploy the VistaState contract
+    const VistaState = await ethers.getContractFactory("VistaState");
+    vistaState = await VistaState.deploy(operatorAdmin.address, traderAdmin.address, serviceAdmin.address);
+    await vistaState.waitForDeployment();
+    console.log("VistaState deployed at:", vistaState.target);
 
-  describe("Deployment", function () {
-    it("Should set the right unlockTime", async function () {
-      const { lock, unlockTime } = await loadFixture(deployOneYearLockFixture);
-
-      expect(await lock.unlockTime()).to.equal(unlockTime);
+    // Deploy the SP0Product contract
+    const SP0Product = await ethers.getContractFactory("SP0Product", {
+      libraries: {
+        Calculations: calculations.target,
+      },
     });
 
-    it("Should set the right owner", async function () {
-      const { lock, owner } = await loadFixture(deployOneYearLockFixture);
+    sp0Product = await SP0Product.deploy(
+      vistaState.target,
+      asset.target,
+      "SP0 Product",
+      500, // management fee (5%)
+      300, // yield fee (3%)
+      ethers.parseUnits("1000000", 6), // max deposit limit in USDC
+      ethers.parseUnits("10", 6), // min deposit in USDC
+      ethers.parseUnits("5", 6) // min withdrawal in USDC
+    );
+    await sp0Product.waitForDeployment();
+    console.log("SP0Product deployed at:", sp0Product.target);
 
-      expect(await lock.owner()).to.equal(owner.address);
+    const txCreateVault = await sp0Product.connect(traderAdmin).createVault("Vault Token", "VLT", Math.floor(Date.now() / 1000));
+    const result = await txCreateVault.wait();
+    // console.log('txn events', result.logs);
+    const eventLog = result.logs[1]; // We assume the second log (index 1) is the VaultCreated event
+    const event = sp0Product.interface.parseLog(eventLog);
+
+    console.log("Event name:", event.name);  // Should print "VaultCreated"
+  console.log("Vault Address:", event.args[0]);  // First argument (vault address)
+  console.log("Token Symbol:", event.args[1]);   // Second argument (token symbol)
+  console.log("Token Name:", event.args[2]);     // Third argument (token name)
+  console.log("Vault Start:", event.args[3]);    
+
+  vaultAddress = event.args[0];
+    
+      // Mint and approve USDC tokens for addr1 and addr2
+      await asset.mint(addr1.address, ethers.parseUnits("100", 6)); // 100 USDC to addr1
+      await asset.mint(addr2.address, ethers.parseUnits("100", 6)); // 100 USDC to addr2
+      console.log("here");
+      await asset.connect(addr1).approve(sp0Product.target, ethers.parseUnits("50", 6));
+      await asset.connect(addr2).approve(sp0Product.target, ethers.parseUnits("50", 6));
+      await asset.connect(addr3).approve(sp0Product.target, ethers.parseUnits("50", 6));
+      console.log("done before each");
+  });
+
+  describe("processDepositQueue", function () {
+    beforeEach(async function () {
+      await sp0Product.connect(operatorAdmin).setIsDepositQueueOpen(true);
     });
 
-    it("Should receive and store the funds to lock", async function () {
-      const { lock, lockedAmount } = await loadFixture(
-        deployOneYearLockFixture
-      );
+    it("Should process deposits and update vault balances", async function () {
+      await sp0Product.connect(addr1).addToDepositQueue(ethers.parseUnits("20", 6));
+      await sp0Product.connect(addr2).addToDepositQueue(ethers.parseUnits("30", 6));
 
-      expect(await ethers.provider.getBalance(lock.target)).to.equal(
-        lockedAmount
-      );
-    });
+      await sp0Product.connect(operatorAdmin).setVaultStatus(vaultAddress, "1");
+      // Process deposit queue using traderAdmin
+      await sp0Product.connect(traderAdmin).processDepositQueue(vaultAddress, 2);
 
-    it("Should fail if the unlockTime is not in the future", async function () {
-      // We don't use the fixture here because we want a different deployment
-      const latestTime = await time.latest();
-      const Lock = await ethers.getContractFactory("Lock");
-      await expect(Lock.deploy(latestTime, { value: 1 })).to.be.revertedWith(
-        "Unlock time should be in the future"
-      );
+      const vaultMetadata = await sp0Product.getVaultMetadata(vaultAddress);
+      expect(vaultMetadata.underlyingAmount).to.equal(ethers.parseUnits("50", 6));
+      expect(await sp0Product.queuedDepositsCount()).to.equal(0);
     });
   });
 
-  describe("Withdrawals", function () {
-    describe("Validations", function () {
-      it("Should revert with the right error if called too soon", async function () {
-        const { lock } = await loadFixture(deployOneYearLockFixture);
+  describe("sendAssetsToTrade", function () {
+    it("Should send assets from the vault to a receiver", async function () {
+      await sp0Product.connect(operatorAdmin).setIsDepositQueueOpen(true);
+      await sp0Product.connect(addr1).addToDepositQueue(ethers.parseUnits("20", 6));
+      await sp0Product.connect(operatorAdmin).setVaultStatus(vaultAddress, "1");
+      await sp0Product.connect(traderAdmin).processDepositQueue(vaultAddress, 1);
+      var vaultMetadata = await sp0Product.getVaultMetadata(vaultAddress);
+      console.log(vaultMetadata);
+      console.log(vaultMetadata[6]);
 
-        await expect(lock.withdraw()).to.be.revertedWith(
-          "You can't withdraw yet"
-        );
-      });
+      const vaultABI = [
+        "function totalAssets() view returns (uint256)",
+        "function totalSupply() view returns (uint256)"
+    ];
 
-      it("Should revert with the right error if called from another account", async function () {
-        const { lock, unlockTime, otherAccount } = await loadFixture(
-          deployOneYearLockFixture
-        );
+      const vaultContract = new ethers.Contract(vaultAddress, vaultABI, ethers.provider);
 
-        // We can increase the time in Hardhat Network
-        await time.increaseTo(unlockTime);
+        // Call totalAssets and totalSupply
+        const totalAssets = await vaultContract.totalAssets();
+        const totalSupply = await vaultContract.totalSupply();
+        
+        console.log("Total Assets:", totalAssets.toString());
+        console.log("Total Supply:", totalSupply.toString());
 
-        // We use lock.connect() to send a transaction from another account
-        await expect(lock.connect(otherAccount).withdraw()).to.be.revertedWith(
-          "You aren't the owner"
-        );
-      });
+      // Add mock market maker address to the allow list in VistaState
+      await vistaState.connect(operatorAdmin).updateMarketMakerPermission(addr3.address, true);
 
-      it("Shouldn't fail if the unlockTime has arrived and the owner calls it", async function () {
-        const { lock, unlockTime } = await loadFixture(
-          deployOneYearLockFixture
-        );
+      // Send assets to trade using traderAdmin
+      await sp0Product.connect(traderAdmin).sendAssetsToTrade(vaultAddress, addr3.address, totalAssets);
 
-        // Transactions are sent using the first signer by default
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).not.to.be.reverted;
-      });
+      vaultMetadata = await sp0Product.getVaultMetadata(vaultAddress);
+      console.log(vaultMetadata);
+      expect(vaultMetadata[6]).to.equal(0);
+      expect(await asset.balanceOf(addr3.address)).to.equal(totalAssets);
     });
 
-    describe("Events", function () {
-      it("Should emit an event on withdrawals", async function () {
-        const { lock, unlockTime, lockedAmount } = await loadFixture(
-          deployOneYearLockFixture
-        );
+    it("Should revert if receiver is not on the allow list", async function () {
+      await sp0Product.connect(operatorAdmin).setIsDepositQueueOpen(true);
+      await sp0Product.connect(addr1).addToDepositQueue(ethers.parseUnits("20", 6));
+      await sp0Product.connect(operatorAdmin).setVaultStatus(vaultAddress, "1");
+      await sp0Product.connect(traderAdmin).processDepositQueue(vaultAddress, 1);
 
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw())
-          .to.emit(lock, "Withdrawal")
-          .withArgs(lockedAmount, anyValue); // We accept any value as `when` arg
-      });
-    });
-
-    describe("Transfers", function () {
-      it("Should transfer the funds to the owner", async function () {
-        const { lock, unlockTime, lockedAmount, owner } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).to.changeEtherBalances(
-          [owner, lock],
-          [lockedAmount, -lockedAmount]
-        );
-      });
+      // Attempt to send assets to non-approved receiver
+      await expect(sp0Product.connect(traderAdmin).sendAssetsToTrade(vaultAddress, addr3.address, ethers.parseUnits("10", 6)))
+        .to.be.revertedWith("400:NotAllowed");
     });
   });
+
+  // describe("addToWithdrawalQueue", function () {
+  //   it("Should allow users to queue withdrawals", async function () {
+  //     await sp0Product.setIsDepositQueueOpen(true);
+  //     await sp0Product.connect(addr1).addToDepositQueue(ethers.utils.parseEther("20"));
+  //     await sp0Product.connect(traderAdmin).processDepositQueue(vault, 1);
+
+  //     // Simulate vault token minting to addr1
+  //     const Vault = await ethers.getContractAt("SP0Vault", vault);
+  //     await Vault.connect(traderAdmin).mint(addr1.address, ethers.utils.parseEther("20"));
+
+  //     // Approve vault tokens and add to withdrawal queue
+  //     await Vault.connect(addr1).approve(sp0Product.address, ethers.utils.parseEther("15"));
+  //     await sp0Product.connect(addr1).addToWithdrawalQueue(vault, ethers.utils.parseEther("15"));
+
+  //     const vaultMetadata = await sp0Product.getVaultMetadata(vault);
+  //     expect(vaultMetadata.queuedWithdrawalsSharesAmount).to.equal(ethers.utils.parseEther("15"));
+  //   });
+
+  //   it("Should revert if withdrawal amount is less than the minimum", async function () {
+  //     await sp0Product.setIsDepositQueueOpen(true);
+  //     await sp0Product.connect(addr1).addToDepositQueue(ethers.utils.parseEther("20"));
+  //     await sp0Product.connect(traderAdmin).processDepositQueue(vault, 1);
+
+  //     // Simulate vault token minting to addr1
+  //     const Vault = await ethers.getContractAt("SP0Vault", vault);
+  //     await Vault.connect(traderAdmin).mint(addr1.address, ethers.utils.parseEther("5"));
+
+  //     // Try to withdraw less than the minimum withdrawal amount
+  //     await Vault.connect(addr1).approve(sp0Product.address, ethers.utils.parseEther("3"));
+  //     await expect(sp0Product.connect(addr1).addToWithdrawalQueue(vault, ethers.utils.parseEther("3")))
+  //       .to.be.revertedWith("400:WA");
+  //   });
+  // });
+
+  // describe("processWithdrawalQueue", function () {
+  //   beforeEach(async function () {
+  //     await sp0Product.setIsDepositQueueOpen(true);
+  //     await sp0Product.connect(addr1).addToDepositQueue(ethers.utils.parseEther("20"));
+  //     await sp0Product.connect(traderAdmin).processDepositQueue(vault, 1);
+
+  //     // Simulate vault token minting to addr1
+  //     const Vault = await ethers.getContractAt("SP0Vault", vault);
+  //     await Vault.connect(traderAdmin).mint(addr1.address, ethers.utils.parseEther("20"));
+  //     await Vault.connect(addr1).approve(sp0Product.address, ethers.utils.parseEther("20"));
+  //   });
+
+  //   it("Should process withdrawals and update balances", async function () {
+  //     // Queue a withdrawal
+  //     await sp0Product.connect(addr1).addToWithdrawalQueue(vault, ethers.utils.parseEther("15"));
+
+  //     // Process the withdrawal
+  //     await sp0Product.connect(traderAdmin).processWithdrawalQueue(vault, 1);
+
+  //     const vaultMetadata = await sp0Product.getVaultMetadata(vault);
+  //     expect(vaultMetadata.queuedWithdrawalsSharesAmount).to.equal(ethers.utils.parseEther("0"));
+  //   });
+
+  //   it("Should revert if trying to process more withdrawals than available", async function () {
+  //     await sp0Product.connect(addr1).addToWithdrawalQueue(vault, ethers.utils.parseEther("10"));
+
+  //     await expect(sp0Product.connect(traderAdmin).processWithdrawalQueue(vault, 2))
+  //       .to.be.revertedWith("500:WS");
+  //   });
+  // });
 });

@@ -6,15 +6,15 @@ require("@nomicfoundation/hardhat-ethers");
 
 async function main() {
 
-  // console.log("Deploying Calculations library...");
-  // const calculations = await hre.ethers.deployContract("Calculations");
-  // await calculations.waitForDeployment();
+  console.log("Deploying Calculations library...");
+  const calculations = await hre.ethers.deployContract("Calculations");
+  await calculations.waitForDeployment();
 
-  // console.log("Calculations library deployed: ", calculations.target);
+  console.log("Calculations library deployed: ", calculations.target);
 
   // Define the admin addresses
-  const vistaStateAddress = process.env.VISTA_STATE_ADDRESS; // Address of the deployed VistaState contract
-  const assetAddress = process.env.UNDERLYING_MASS_TOKEN_ADDRESS; // Address of the underlying asset (ERC20 token)
+  const vistaStateAddress = process.env.VISTA_STATE_BASE_SEPOLIA_ADDRESS; // Address of the deployed VistaState contract
+  const assetAddress = process.env.UNDERLYING_BASE_SEPOLIA_USDC_ADDRESS; // Address of the underlying asset (ERC20 token)
   const productName = process.env.PRODUCT_NAME;
   const managementFeeBps = process.env.MANAGEMENT_FEE;
   const yieldFeeBps = process.env.YIELD_FEE_BPS;
@@ -26,7 +26,7 @@ async function main() {
   // Deploy the contract
   const SP0Product = await hre.ethers.getContractFactory("SP0Product", {
         libraries: {
-            Calculations: "0x20322DC538F70C76b77afC2e38E947bB613Aa0db",
+            Calculations: calculations.target,
         },
     });
 
@@ -47,7 +47,7 @@ async function main() {
   console.log("SP0Product deployed (backup): ", sp0Product.address);
 
   saveFrontendFiles(sp0Product);
-  //saveCalculationsLibraryAddress(calculations);
+  saveCalculationsLibraryAddress(calculations);
 }
 
 function saveFrontendFiles(sp0Product) {

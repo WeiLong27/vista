@@ -35,6 +35,14 @@ module.exports = {
     sepolia: {
       url: process.env.ALCHEMY_SEPOLIA_URL,
       accounts: [process.env.SEPOLIA_PRIVATE_KEY]
+    },
+    base_sepolia: {
+      url: process.env.BASE_SEPOLIA_RPC_URL,
+      accounts: [process.env.SEPOLIA_PRIVATE_KEY]
+    },
+    arb_sepolia: {
+      url: process.env.ARB_SEPOLIA_RPC_URL,
+      accounts: [process.env.SEPOLIA_PRIVATE_KEY]
     }
   },
   etherscan: {
